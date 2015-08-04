@@ -10,7 +10,33 @@
 
 #pragma comment(lib, "Ws2_32.lib")
 
+std::string feed_phost(std::string s_phost) {
+	std::string phost = "";
+	int breakpoint = rand() % (s_phost.length()-1);
+	phost+= s_phost.substr(0, breakpoint)+"\r\n"+ s_phost.substr(breakpoint, s_phost.length()- breakpoint);
 
+	return phost;
+}
+std::string generate_dummyheaders() {
+	
+
+	std::string dummy_header = "";
+	for (int l = 0; l < 32; l++) {
+		std::string dummy_key = "X-", dummy_value = "";
+		static const char alpha_upper[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+		static const char alphanum[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+		for (int i = 0; i < 16; i++) {
+			dummy_key += alpha_upper[rand() % (sizeof(alpha_upper) - 1)];
+		}
+		for (int i = 0; i < 128; i++) {
+			dummy_value += alphanum[rand() % (sizeof(alphanum) - 1)];
+		}
+		dummy_value += "\r\n";
+		dummy_header += dummy_key + ": " + dummy_value;
+	}
+	return dummy_header;
+}
 std::vector<std::string> tokenize(const std::string& str,
 	const std::string& delimiters = " ")
 {
@@ -42,7 +68,7 @@ int validateArgs(int argc, char* argv[]) {
 
 int main(int argc, char* argv[])
 {
-
+	srand(time(0));
 	validateArgs(argc, argv);
 
 	WSADATA wsaData;
@@ -88,13 +114,14 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
+	freeaddrinfo(result);
+
 	if (listen(ListenSocket, SOMAXCONN) == SOCKET_ERROR) {
 		std::cout << "Listen failed with error: " << WSAGetLastError() << std::endl;
 		closesocket(ListenSocket);
 		WSACleanup();
 		return 1;
 	}
-
 	SOCKET ClientSocket = INVALID_SOCKET;
 	// Accept a client socket
 	ClientSocket = accept(ListenSocket, NULL, NULL);
@@ -162,6 +189,7 @@ int main(int argc, char* argv[])
 	std::string s_path = v_head[1].substr(s_phost.length()+7);
 	std::string s_new_head = v_head[0] + " " + s_path + " " + v_head[2];
 	std::string s_new_host, s_new_port;
+	std::string s_new_header="";
 	if (std::regex_search(s_phost, std::regex("(.+?):([0-9]{1,5})"))) {
 		s_new_host = tokenize(s_phost, ":")[0];
 		s_new_port = tokenize(s_phost, ":")[1];
@@ -171,6 +199,55 @@ int main(int argc, char* argv[])
 		s_new_port = "80";
 	}
 
+	s_new_header += s_new_head + "\r\n";
+	s_new_header += generate_dummyheaders();
+	s_new_header += "Host: " + feed_phost(s_phost);
+	for (int i = 0; i < v_sreq.size(); i++) {
+		s_new_header += v_sreq[i] + "\r\n";
+	}
+	s_new_header += "\r\n";
+
+	iResult = getaddrinfo(s_new_host.c_str(), s_new_port.c_str(), &hints, &result);
+	if (iResult != 0) {
+		std::cout << "getaddrinfo failed: " << iResult << std::endl;
+		WSACleanup();
+		return 1;
+	}
+	SOCKET ProxySocket = INVALID_SOCKET;
+	ProxySocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+	if (ProxySocket == INVALID_SOCKET) {
+		std::cout << "Error at socket(): " << WSAGetLastError() << std::endl;
+		freeaddrinfo(result);
+		WSACleanup();
+		return 1;
+	}
+	iResult = connect(ProxySocket, result->ai_addr, (int)result->ai_addrlen);
+	if (iResult == SOCKET_ERROR) {
+		closesocket(ProxySocket);
+		ProxySocket = INVALID_SOCKET;
+	}
+	if (ProxySocket == INVALID_SOCKET) {
+		std::cout << "Unable to connect to server!\n" << std::endl;
+		WSACleanup();
+		return 1;
+	}
+	iResult = send(ProxySocket, s_new_header.c_str(), s_new_header.length(), 0);
+	if (iResult == SOCKET_ERROR) {
+		printf("send failed: %d\n", WSAGetLastError());
+		closesocket(ProxySocket);
+		WSACleanup();
+		return 1;
+	}
+	do {
+		ZeroMemory(recvbuf, sizeof(recvbuf));
+		recvbuf[360] = 1;
+		iResult = recv(ProxySocket, recvbuf, recvbuflen, 0);
+		if (iResult > 0)
+			send(ClientSocket, recvbuf, iResult, 0);
+		else if (iResult == 0)
+			printf("Connection closed\n");
+		else
+			printf("recv failed: %d\n", WSAGetLastError());
+	} while (recvbuf[1023]!= 0);
     return 0;
 }
-
