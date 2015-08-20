@@ -164,7 +164,7 @@ int throw_response(const SOCKET ProxySocket, const SOCKET ClientSocket) {
 	send(ClientSocket, s_header.c_str(), s_header.length(), 0);
 	send(ClientSocket, s_data.c_str(), s_data.length(), 0);
 	ZeroMemory(recvbuf, recvbuflen);
-	while (recv_len < content_length || !std::regex_search(recvbuf, std::regex("\r\n"))) {
+	while (recv_len < content_length || !std::regex_search(recvbuf, std::regex("\r\n$"))) {
 		ZeroMemory(recvbuf, recvbuflen);
 		iResult = recv(ProxySocket, recvbuf, recvbuflen, 0);
 		if (iResult > 0) {
