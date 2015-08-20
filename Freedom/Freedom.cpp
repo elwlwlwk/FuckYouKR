@@ -90,7 +90,7 @@ std::vector<std::string> generate_new_header(const std::vector<std::string> v_he
 		std::vector<std::string> v_line = tokenize(v_header[i], ": ");
 
 		if (std::regex_search(v_line[0], std::regex("[Hh][Oo][Ss][Tt]"))) {
-			s_phost = v_line[1];
+			s_phost = trim(v_header[i].substr(5));
 		}
 		else if (std::regex_search(v_line[0], std::regex("[Cc][Oo][Nn][Nn][Ee][Cc][Tt][Ii][Oo][Nn]"))) {
 			if (std::regex_search(v_line[1], std::regex("(keep-alive|persist)"))) {
