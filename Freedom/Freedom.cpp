@@ -1,14 +1,15 @@
-// Freedom.cpp : Defines the entry point for the console application.
-//
-
 #include "stdafx.h"
 #include <iostream>
+#include <stdio.h>
+#include <stdlib.h>
 #include <WinSock2.h>
 #include <ws2tcpip.h>
+#include <process.h>
 #include <string>
 #include <regex>
-
 #pragma comment(lib, "Ws2_32.lib")
+#define BUFSIZE 4096
+
 
 std::vector<std::string> feed_phost(std::string s_phost) {
 	std::string phost = "";
@@ -93,11 +94,16 @@ std::vector<std::string> generate_new_header(const std::vector<std::string> v_he
 			s_phost = trim(v_header[i].substr(5));
 		}
 		else if (std::regex_search(v_line[0], std::regex("[Cc][Oo][Nn][Nn][Ee][Cc][Tt][Ii][Oo][Nn]"))) {
-			if (std::regex_search(v_line[1], std::regex("(keep-alive|persist)"))) {
-				v_sreq.push_back("Connection: close");
+			try {
+				if (std::regex_search(v_line[1], std::regex("(keep-alive|persist)"))) {
+					v_sreq.push_back("Connection: close");
+				}
+				else {
+					v_sreq.push_back(v_header[i]);
+				}
 			}
-			else {
-				v_sreq.push_back(v_header[i]);
+			catch (...) {
+				v_sreq.push_back("Connection: close");
 			}
 		}
 		else if (!std::regex_search(v_line[0], std::regex("(proxy-connection|PROXY-CONNECTION)"))) {
@@ -145,7 +151,7 @@ std::vector<std::string> process_new_host(const std::vector<std::string> v_heade
 
 int throw_response(const SOCKET ProxySocket, const SOCKET ClientSocket) {
 	int iResult;
-	char recvbuf[1024];
+	char recvbuf[BUFSIZE];
 	int recvbuflen = sizeof(recvbuf);
 	int content_length = 0;
 	iResult = recv(ProxySocket, recvbuf, recvbuflen, 0);
@@ -191,100 +197,133 @@ bool validate_header(std::string header) {
 	}
 }
 
-int main(int argc, char* argv[])
+
+typedef struct
 {
+	SOCKET hClntSock;
+	SOCKADDR_IN clntAddr;
+} PER_HANDLE_DATA, *LPPER_HANDLE_DATA;
 
-	srand(time(0));
-	validateArgs(argc, argv);
+typedef struct
+{
+	OVERLAPPED overlapped;
+	char buffer[BUFSIZE];
+	WSABUF wsaBuf;
+} PER_IO_DATA, *LPPER_IO_DATA;
 
+unsigned int __stdcall CompletionThread(LPVOID pComPort);
+
+void ErrorHandling(char *message);
+
+int main(int argc, char** argv)
+{
 	WSADATA wsaData;
-	int iResult;
+	HANDLE hCompletionPort;
 
-	// Initialize Winsock
-	iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-	if (iResult != 0) {
-		std::cout << "WSAStartup failed: " << iResult << std::endl;
-		return 1;
+	SYSTEM_INFO SystemInfo;
+
+	SOCKADDR_IN servAddr;
+
+	LPPER_IO_DATA PerIoData;
+
+	LPPER_HANDLE_DATA PerHandleData;
+
+	SOCKET hServSock;
+	int RecvBytes;
+	int i, Flags;
+
+	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+		ErrorHandling("WSAStartup() error!");
+
+	hCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 50);
+
+
+	GetSystemInfo(&SystemInfo);
+
+	for (i = 0; i<70; i++)
+		_beginthreadex(NULL, 0, CompletionThread, (LPVOID)hCompletionPort, 0, NULL);
+
+	hServSock = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
+	servAddr.sin_family = AF_INET;
+	servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+	servAddr.sin_port = htons(atoi("8800"));
+
+	bind(hServSock, (SOCKADDR*)&servAddr, sizeof(servAddr));
+	listen(hServSock, 5);
+
+	while (TRUE)
+	{
+		SOCKET hClntSock;
+		SOCKADDR_IN clntAddr;
+		int addrLen = sizeof(clntAddr);
+
+		hClntSock = accept(hServSock, (SOCKADDR*)&clntAddr, &addrLen);
+
+		PerHandleData = (LPPER_HANDLE_DATA)malloc(sizeof(PER_HANDLE_DATA));
+		PerHandleData->hClntSock = hClntSock;
+		memcpy(&(PerHandleData->clntAddr), &clntAddr, addrLen);
+
+		CreateIoCompletionPort((HANDLE)hClntSock, hCompletionPort, (DWORD)PerHandleData, 0);
+
+		PerIoData = (LPPER_IO_DATA)malloc(sizeof(PER_IO_DATA));
+		memset(&(PerIoData->overlapped), 0, sizeof(OVERLAPPED));
+		PerIoData->wsaBuf.len = BUFSIZE;
+		PerIoData->wsaBuf.buf = PerIoData->buffer;
+
+		Flags = 0;
+
+		//4. 중첩된 데이터입력.
+		WSARecv(PerHandleData->hClntSock,
+			&(PerIoData->wsaBuf),
+			1,
+			(LPDWORD)&RecvBytes,
+			(LPDWORD)&Flags,
+			&(PerIoData->overlapped),
+			NULL
+			);
+
 	}
+	return 0;
+}
 
-	struct addrinfo *result = NULL, *ptr = NULL, hints;
+//입출력 완료에 따른 쓰레드의 행동 정의
+unsigned int __stdcall CompletionThread(LPVOID pComPort)
 
-	ZeroMemory(&hints, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_flags = AI_PASSIVE;
+{
+	HANDLE hCompletionPort = (HANDLE)pComPort;
 
-	// Resolve the local address and port to be used by the server
-	iResult = getaddrinfo(NULL, argv[2], &hints, &result);
-	if (iResult != 0) {
-		std::cout << "getaddrinfo failed: " << iResult << std::endl;
-		WSACleanup();
-		return 1;
-	}
-	SOCKET ListenSocket = INVALID_SOCKET;
-	ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-	if (ListenSocket == INVALID_SOCKET) {
-		std::cout << "Error at socket(): " << WSAGetLastError() << std::endl;
-		freeaddrinfo(result);
-		WSACleanup();
-		return 1;
-	}
+	DWORD BytesTransferred;
+	LPPER_HANDLE_DATA PerHandleData;
+	LPPER_IO_DATA PerIoData;
+	DWORD flags;
 
-	iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
-	if (iResult == SOCKET_ERROR) {
-		std::cout << "bind failed with error: " << WSAGetLastError() << std::endl;
-		freeaddrinfo(result);
-		closesocket(ListenSocket);
-		WSACleanup();
-		return 1;
-	}
+	while (1)
+	{
+		GetQueuedCompletionStatus(hCompletionPort,    // Completion Port
+			&BytesTransferred,
+			(LPDWORD)&PerHandleData,
+			(LPOVERLAPPED*)&PerIoData,
+			INFINITE
+			);
 
-	freeaddrinfo(result);
+		if (BytesTransferred == 0)
+		{
+			closesocket(PerHandleData->hClntSock);
+			free(PerHandleData);
+			free(PerIoData);
 
-	if (listen(ListenSocket, SOMAXCONN) == SOCKET_ERROR) {
-		std::cout << "Listen failed with error: " << WSAGetLastError() << std::endl;
-		closesocket(ListenSocket);
-		WSACleanup();
-		return 1;
-	}
-	SOCKET ClientSocket = INVALID_SOCKET;
-	// Accept a client socket
-	while (1) {
-		ClientSocket = accept(ListenSocket, NULL, NULL);
-		if (ClientSocket == INVALID_SOCKET) {
-			std::cout << "accept failed: " << WSAGetLastError() << std::endl;
-			closesocket(ListenSocket);
-			WSACleanup();
-			return 1;
+			continue;
 		}
 
-		char recvbuf[1024];
-		int iSendResult;
-		int recvbuflen = 1024;
+		PerIoData->wsaBuf.buf[BytesTransferred] = '\0';
 
-		std::string header = std::string();
-		// Receive until the peer shuts down the connection
-		do {
-			ZeroMemory(recvbuf, sizeof(recvbuf));
-			iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
-			if (iResult > 0) {
-				header.append(recvbuf, iResult);
-			}
-			else if (iResult == 0) {
-				printf("Connection closing...\n");
-				closesocket(ClientSocket);
-			}
-			else {
-				printf("recv failed: %d\n", WSAGetLastError());
-				closesocket(ClientSocket);
-				break;
-				//WSACleanup();
-				//return 1;
-			}
+		printf("Recv[%s]\n", PerIoData->wsaBuf.buf);
+		std::string header = PerIoData->wsaBuf.buf;
+		int iResult;
 
-		} while (!std::regex_search(header, std::regex("\r\n\r\n")));
-		ZeroMemory(recvbuf, sizeof(recvbuf));
+
+
+
 		std::vector<std::string> v_new_header;
 		std::vector<std::string> s_new_host;
 		if (!validate_header(header)) {
@@ -292,31 +331,27 @@ int main(int argc, char* argv[])
 		}
 		std::vector<std::string> v_header = tokenize(header, "\r\n");
 		std::string content;
+		if (std::regex_search(header, std::regex("CONNECT"))) {
+			closesocket(PerHandleData->hClntSock);
+			continue;
+		}
 		for (int i = 0; i < v_header.size(); i++) {
 			if (std::regex_search(v_header[i], std::regex("Content-Length"))) {
 				int content_length = atoi(trim(tokenize(v_header[i], ":")[1]).c_str());
-				if (iResult < sizeof(recvbuf)) {
-					std::smatch m;
-					std::regex_search(header, m, std::regex("\r\n\r\n"));
-					content = header.substr(m.position() + 4)+"\r\n";
-					header = header.substr(0, m.position() + 4);
-				}
+				std::smatch m;
+				std::regex_search(header, m, std::regex("\r\n\r\n"));
+				content = header.substr(m.position() + 4) + "\r\n";
+				header = header.substr(0, m.position() + 4);
+
 			}
 		}
 		v_header = tokenize(header, "\r\n");
-		if (std::regex_search(v_header[0], std::regex("[Cc][Oo][Nn][Nn][Ee][Cc][Tt]"))) {
-			handle_https(v_header);
-			closesocket(ClientSocket);
-			continue;
-			/*v_new_header = v_header;
-			s_new_host = process_new_host(v_header);
-			send(ClientSocket, "HTTP/1.1 200 Connection established\r\n\r\n", 40, 0);*/
-		}
-		else {
-			v_new_header = generate_new_header(v_header);
-			s_new_host = process_new_host(v_header);
-		}
 
+		v_new_header = generate_new_header(v_header);
+		s_new_host = process_new_host(v_header);
+
+		struct addrinfo *result = NULL, *ptr = NULL, hints;
+		ZeroMemory(&hints, sizeof(hints));
 		//gethostbyname(s_new_host.c_str());
 		iResult = getaddrinfo(s_new_host[0].c_str(), s_new_host[1].c_str(), &hints, &result);
 		if (iResult != 0) {
@@ -353,8 +388,32 @@ int main(int argc, char* argv[])
 			return 1;
 		}
 
-		iResult = throw_response(ProxySocket, ClientSocket);
-		closesocket(ProxySocket);
+		iResult = throw_response(ProxySocket, PerHandleData->hClntSock);
+
+		//PerIoData->wsaBuf.len = BytesTransferred;
+		//WSASend(PerHandleData->hClntSock, &(PerIoData->wsaBuf), 1, NULL, 0, NULL, NULL);
+
+		//// RECEIVE AGAIN
+		//memset(&(PerIoData->overlapped), 0, sizeof(OVERLAPPED));
+		//PerIoData->wsaBuf.len = BUFSIZE;
+		//PerIoData->wsaBuf.buf = PerIoData->buffer;
+
+		//flags = 0;
+		//WSARecv(PerHandleData->hClntSock,
+		//	&(PerIoData->wsaBuf),
+		//	1,
+		//	NULL,
+		//	&flags,
+		//	&(PerIoData->overlapped),
+		//	NULL
+		//	);
 	}
 	return 0;
+}
+
+void ErrorHandling(char *message)
+{
+	fputs(message, stderr);
+	fputc('\n', stderr);
+	exit(1);
 }
